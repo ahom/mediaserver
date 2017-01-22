@@ -15,17 +15,17 @@ Streams = namedtuple('Streams', ['videos', 'audios', 'subtitles'])
 FileFormat = namedtuple('FileFormat', ['filename', 'tags'])
 FileInfo = namedtuple('FileInfo', ['file_format', 'streams'])
 
-class GetFFProbeOutput(task.Task):
+class GetFFprobeOutput(task.Task):
     default_provides = 'ffprobe_output'
 
     def __init__(self, ffprobe_func=FFprobe):
-        super(GetFFProbeOutput, self).__init__()
+        super(GetFFprobeOutput, self).__init__()
         self.ffprobe_func = ffprobe_func
 
     def execute(self, file_path):
-        ff = ffprobe_func(
+        ff = self.ffprobe_func(
             inputs={ file_path.as_posix(): None },
-            globaloptions=[
+            global_options=[
                 '-v', 'error',
                 '-print_format', 'json',
                 '-show_streams'
@@ -36,7 +36,7 @@ class GetFFProbeOutput(task.Task):
 
         return out
 
-class DecodeFFProbeOutput(task.Task):
+class DecodeFFprobeOutput(task.Task):
     default_provides = 'file_info'
 
     def execute(self, ffprobe_output):
@@ -53,7 +53,7 @@ class DecodeFFProbeOutput(task.Task):
                         width=o['width'],
                         height=o['height']
                     )
-                    for o in j if j['codec_type'] == 'video'
+                    for o in streams if o['codec_type'] == 'video'
                 ],
                 audios=[
                     AudioStream(
@@ -61,22 +61,22 @@ class DecodeFFProbeOutput(task.Task):
                         codec=o['codec_name'],
                         lang=o.get('tags', {}).get('language', None)
                     )
-                    for o in j if j['codec_type'] == 'audio'
+                    for o in streams if o['codec_type'] == 'audio'
                 ],
                 subtitles=[
                     SubtitleStream(
                         index=o['index'],
                         lang=o.get('tags', {}).get('language', None)
                     )
-                    for o in j if j['codec_type'] == 'subtitle'
+                    for o in streams if o['codec_type'] == 'subtitle'
                 ]
             )
         )
 
 def GetFileInfo():
     f = lf.Flow()
-    f.add(GetFFProbeOutput())
-    f.add(DecodeFFProbeOutput())
+    f.add(GetFFprobeOutput())
+    f.add(DecodeFFprobeOutput())
     return f
 
 class FetchTMDbIds(task.Task):
@@ -165,7 +165,7 @@ class EncodeAudioStream(task.Task):
                     '-b:a', '160k',
                     '-f', 'webm',
                     '-dash', '1'
-                ])
+                ]
             }
         )
 
@@ -186,7 +186,7 @@ class EncodeSubtitleStream(task.Task):
             outputs={ 
                 output_file_path.as_posix(): [
                     '-map', '0:%s' % subtitle_stream.index
-                ])
+                ]
             }
         )
 
