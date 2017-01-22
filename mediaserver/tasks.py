@@ -35,7 +35,7 @@ class GetFFprobeOutputTask(luigi.Task):
             output_file.write(out)
 
     def output(self):
-        return luigi.LocalTarget('%s.ffprobe' % self.file_path)
+        return luigi.LocalTarget('%s.ffprobe' % self.file_path.as_posix())
 
 
 class DecodeFFprobeOutputTask(luigi.Task):
@@ -81,21 +81,84 @@ class DecodeFFprobeOutputTask(luigi.Task):
                 ))
 
     def output(self):
-        return luigi.LocalTarget('%s.info' % self.file_path)
+        return luigi.LocalTarget('%s.file_info' % self.file_path.as_posix())
 
-class EncodeVideoStream(task.Task):
-    default_provides = 'video_encode_file_path'
+class FilterStreamsTask(luigi.Task):
+    file_path = luigi.Parameter()
 
-    DEFINITION_TO_BITRATE = {
-        1080: '6M',
-        720:  '3M',
-        480:  '1.5M'
-    }
+    def requires(self):
+        return DecodeFFprobeOutputTask(self.file_path)
 
-    def __init__(self, definition, ffmpeg_func=FFmpeg, **kwargs):
-        super(EncodeVideoStream, self).__init__(**kwargs)
-        self.definition = definition
-        self.ffmpeg_func = ffmpeg_func
+    def run(self):
+        with self.input().open('r') as file_info_file:
+            file_info = pickle.loads(file_info_file)
+
+            # Get widest video stream
+            max_width = max(v.width for v in file_info.streams.videos)
+            video_streams = [v for v in file_info.streams.videos if v.width == max_width]
+
+            # Get eng/fre audio streams
+            audio_streams = {
+                lang: [a for a in file_path.streams.audios if a.lang == lang] for lang in ['eng', 'fre']
+            }
+
+            # Get eng/fre subtitle streams
+            subtitle_streams = {
+                lang: [a for a in file_path.streams.subtitles] for lang in ['eng', 'fre']
+            }
+
+            tasks = [] 
+            if video_streams:
+                video_streams = video_streams[0]
+
+            for a in audio_streams.values():
+                if a:
+                    a = a[0]
+
+            for s in subtitle_streams.values():
+                if s:
+                    s = s[0]
+
+            with self.output().open('w') as output_file:
+                pickle.dumps(Streams(
+                    videos=video_streams,
+                    audios=audio_streams,
+                    subtitles=subtitle_streams
+                ))
+
+    def output(self):
+        return luigi.LocalTarget('%s.streams' % self.file_path.as_posix())
+
+
+class EncodeManifestTask(luigi.Task):
+    file_path = luigi.Parameter()
+
+    def requires(self):
+        return FilterStreamsTask(self.file_path)
+
+    def run(self):
+        with self.input().open('r') as file_info_file:
+            file_info = pickle.loads(file_info_file)
+
+            # Getting video stream
+
+            video_stream = [s for s in file_info.streams.video if s.width == max(]
+            for v in file_info.streams.videos:
+
+
+
+
+    def output(self):
+        return luigi.LocalTarget((file_path.parent / 'manifest.mpd').as_posix())
+
+class EncodeVideoStreamTask(luigi.Task):
+    file_path = luigi.Parameter()
+    stream_index = luigi.Parameter()
+    definition = luigi.Parameter()
+    bitrate = luigi.Parameter()
+
+    def requires(self):
+        return DecodeFFprobeOutputTask(self.file_path)
 
     def _first_pass(self, file_work_path, common_options):
         ff = self.ffmpeg_func(
@@ -103,7 +166,8 @@ class EncodeVideoStream(task.Task):
             outputs={ 
                 '/dev/null': chain(common_options, [
                     '-pass', '1',
-                    '-speed', '4'
+                    '-speed', '4',
+                    '-passlogfile', ''
                 ])
             }
         )
@@ -129,27 +193,23 @@ class EncodeVideoStream(task.Task):
 
         return output_file_path
 
-    def execute(self, file_work_path, video_stream):
-        if self.definition > video_stream.height:
-            # We do not encode a video with a definition > than the source
-            return None
-        else:
-            common_options = [
-                '-map', '0:%s' % video_stream.index,
-                '-c:v', 'libvpx-vp9',
-                '-s', '%sx%s' % (self.definition * video_stream.width // video_stream.height, self.definition),
-                '-b:v', self.DEFINITION_TO_BITRATE[self.definition],
-                '-tile-columns', '6',
-                '-frame-parallel', '1',
-                '-keyint_min', '150',
-                '-g', '150',
-                '-qmin', '0',
-                '-qmax', '50',
-                '-f', 'webm',
-                '-dash', '1'
-            ]
-            self._first_pass(file_work_path, common_options)
-            return self._second_pass(file_work_path, common_options)
+    def run(self, file_work_path, video_stream):
+        common_options = [
+            '-map', '0:%s' % video_stream.index,
+            '-c:v', 'libvpx-vp9',
+            '-s', '%sx%s' % (self.definition * video_stream.width // video_stream.height, self.definition),
+            '-b:v', self.DEFINITION_TO_BITRATE[self.definition],
+            '-tile-columns', '6',
+            '-frame-parallel', '1',
+            '-keyint_min', '150',
+            '-g', '150',
+            '-qmin', '0',
+            '-qmax', '50',
+            '-f', 'webm',
+            '-dash', '1'
+        ]
+        self._first_pass(file_work_path, common_options)
+        return self._second_pass(file_work_path, common_options)
 
 class EncodeAudioStream(task.Task):
     default_provides = 'audio_encode_file_path'
