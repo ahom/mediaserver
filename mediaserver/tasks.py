@@ -4,6 +4,7 @@ from collections import namedtuple
 from itertools import chain
 import uuid
 import os
+import shutil
 
 import luigi
 
@@ -20,16 +21,14 @@ class GetFFprobeOutputTask(luigi.Task):
     file_path = luigi.Parameter()
 
     def run(self):
-        ff = self.ffprobe_func(
+        out, _ = FFprobe(
             inputs={ file_work_path.as_posix(): None },
             global_options=[
                 '-v', 'error',
                 '-print_format', 'json',
                 '-show_streams'
             ]
-        )
-
-        out, err = ff.run()
+        ).run()
 
         with self.output().open('w') as output_file:
             output_file.write(out)
@@ -107,17 +106,14 @@ class FilterStreamsTask(luigi.Task):
                 lang: [a for a in file_path.streams.subtitles] for lang in ['eng', 'fre']
             }
 
-            tasks = [] 
-            if video_streams:
-                video_streams = video_streams[0]
+            # Only get first stream
+            video_streams = video_streams[:1]
 
             for a in audio_streams.values():
-                if a:
-                    a = a[0]
+                a = a[:1]
 
             for s in subtitle_streams.values():
-                if s:
-                    s = s[0]
+                s = s[:1]
 
             with self.output().open('w') as output_file:
                 pickle.dumps(Streams(
@@ -129,76 +125,45 @@ class FilterStreamsTask(luigi.Task):
     def output(self):
         return luigi.LocalTarget('%s.streams' % self.file_path.as_posix())
 
-
-class EncodeManifestTask(luigi.Task):
-    file_path = luigi.Parameter()
-
-    def requires(self):
-        return FilterStreamsTask(self.file_path)
-
-    def run(self):
-        with self.input().open('r') as file_info_file:
-            file_info = pickle.loads(file_info_file)
-
-            # Getting video stream
-
-            video_stream = [s for s in file_info.streams.video if s.width == max(]
-            for v in file_info.streams.videos:
-
-
-
-
-    def output(self):
-        return luigi.LocalTarget((file_path.parent / 'manifest.mpd').as_posix())
-
 class EncodeVideoStreamTask(luigi.Task):
     file_path = luigi.Parameter()
-    stream_index = luigi.Parameter()
+    video_stream = luigi.Parameter()
     definition = luigi.Parameter()
     bitrate = luigi.Parameter()
 
-    def requires(self):
-        return DecodeFFprobeOutputTask(self.file_path)
-
-    def _first_pass(self, file_work_path, common_options):
-        ff = self.ffmpeg_func(
-            inputs={ file_work_path.as_posix(): None },
+    def _first_pass(self, common_options):
+        FFmpeg(
+            inputs={ self.file_path.as_posix(): None },
             outputs={ 
                 '/dev/null': chain(common_options, [
                     '-pass', '1',
                     '-speed', '4',
-                    '-passlogfile', ''
+                    '-passlogfile', '%s.stats' % self.output().path
                 ])
             }
-        )
+        ).run()
 
-        ff.run()
-
-    def _second_pass(self, file_work_path, common_options):
-        output_file_path = file_work_path.parent / ('video-%sp.webm' % self.definition)
-
-        ff = self.ffmpeg_func(
-            inputs={ file_work_path.as_posix(): None },
+    def _second_pass(self, common_options):
+        temp_file_path = '%s.tmp' % self.output().path 
+        FFmpeg(
+            inputs={ self.file_path.as_posix(): None },
             outputs={ 
-                output_file_path.as_posix(): chain(common_options, [
+                temp_file_path: chain(common_options, [
                     '-pass', '2',
                     '-speed', '1',
                     '-auto-alt-ref', '1',
                     '-lag-in-frames', '25'
                 ])
             }
-        )
+        ).run()
+        shutil.move(temp_file_path, self.output().path)
 
-        ff.run()
-
-        return output_file_path
-
-    def run(self, file_work_path, video_stream):
+    def run(self):
         common_options = [
-            '-map', '0:%s' % video_stream.index,
+            '-map', '0:%s' % self.video_stream.index,
             '-c:v', 'libvpx-vp9',
-            '-s', '%sx%s' % (self.definition * video_stream.width // video_stream.height, self.definition),
-            '-b:v', self.DEFINITION_TO_BITRATE[self.definition],
+            '-s', '%sx%s' % (self.definition * self.video_stream.width // self.video_stream.height, self.definition),
+            '-b:v', self.bitrate,
             '-tile-columns', '6',
             '-frame-parallel', '1',
             '-keyint_min', '150',
@@ -208,97 +173,191 @@ class EncodeVideoStreamTask(luigi.Task):
             '-f', 'webm',
             '-dash', '1'
         ]
-        self._first_pass(file_work_path, common_options)
-        return self._second_pass(file_work_path, common_options)
+        self._first_pass(common_options)
+        self._second_pass(common_options)
 
-class EncodeAudioStream(task.Task):
-    default_provides = 'audio_encode_file_path'
+    def output(self):
+        return luigi.LocalTarget(self.file_path.parent / 'video_%s_%sp.webm' % (self.video_stream.index, self.definition))
 
-    def __init__(self, ffmpeg_func=FFmpeg, **kwargs):
-        super(EncodeAudioStream, self).__init__(**kwargs)
-        self.ffmpeg_func = ffmpeg_func
+class EncodeAudioStreamTask(task.Task):
+    file_path = luigi.Parameter()
+    audio_stream = luigi.Parameter()
 
-    def execute(self, file_work_path, audio_stream):
-        output_file_path = file_work_path.parent / ('audio-%s.webm' % audio_stream.lang)
-
-        ff = self.ffmpeg_func(
-            inputs={ file_work_path.as_posix(): None },
+    def run(self):
+        temp_file_path = '%s.tmp' % self.output().path 
+        FFmpeg(
+            inputs={ temp_file_path: None },
             outputs={ 
-                output_file_path.as_posix(): [
-                    '-map', '0:%s' % audio_stream.index,
+                self.output().path: [
+                    '-map', '0:%s' % self.audio_stream.index,
                     '-c:a', 'libvorbis',
                     '-b:a', '160k',
                     '-f', 'webm',
                     '-dash', '1'
                 ]
             }
-        )
+        ).run()
+        shutil.move(temp_file_path, self.output().path)
 
-        ff.run()
+    def output(self):
+        return luigi.LocalTarget(self.file_path.parent / 'audio_%s.webm' % self.audio_stream.index)
 
-        return output_file_path
+class EncodeSubtitleStreamTask(task.Task):
+    file_path = luigi.Parameter()
+    subtitle_stream = luigi.Parameter()
 
-class EncodeSubtitleStream(task.Task):
-    default_provides = 'subtitle_encode_file_path'
-
-    def __init__(self, ffmpeg_func=FFmpeg, **kwargs):
-        super(EncodeSubtitleStream, self).__init__(**kwargs)
-        self.ffmpeg_func = ffmpeg_func
-
-    def execute(self, file_work_path, subtitle_stream):
-        output_file_path = file_work_path.parent / ('subtitle-%s.vtt' % subtitle_stream.lang)
-
-        ff = self.ffmpeg_func(
-            inputs={ file_work_path.as_posix(): None },
+    def run(self):
+        temp_file_path = '%s.tmp' % self.output().path 
+        FFmpeg(
+            inputs={ temp_file_path: None },
             outputs={ 
-                output_file_path.as_posix(): [
-                    '-map', '0:%s' % subtitle_stream.index
+                self.output().path: [
+                    '-map', '0:%s' % self.subtitle_stream.index
                 ]
             }
-        )
+        ).run()
+        shutil.move(temp_file_path, self.output().path)
 
-        ff.run()
+    def output(self):
+        return luigi.LocalTarget(self.file_path.parent / 'subtitle_%s.vtt' % self.subtitle_stream.index)
+    default_provides = 'subtitle_encode_file_path'
 
-        return output_file_path
+class EncodeManifestTask(luigi.Task):
+    file_path = luigi.Parameter()
+    adaptation_sets = luigi.Parameter()
 
-def CreateWorkDir(task.Task):
-    default_provides = 'work_dir'
+    def run(self):
+        current_count = 0
+        adaptation_sets_helper = []
+        for name, files in self.adaptation_sets:
+            adaptation_sets_helper.append((name, files, current_count))
+            current_count += len(files)
 
-    def __init__(self, parent_path, **kwargs):
-        super(CreateWorkDir, self).__init__(**kwargs)
-        self.parent_path = parent_path
+        temp_file_path = '%s.tmp' % self.output().path 
+        FFmpeg(
+            inputs={ 
+                file_name.relative_to(self.base_path).as_posix(): ['-f', 'webm_dash_manifest'] 
+                    for file_name in chain.from_iterable(
+                        files for _, files in self.adaptation_sets
+                    )              
+            },
+            outputs={ 
+                temp_file_path: chain(
+                    ['-c', 'copy'],
+                    chain.from_iterable(
+                        [['-map', str(x)] for x in range(adaptation_sets_helper[-1][2])]
+                    ),
+                    [
+                        '-f', 'webm_dash_manifest',
+                        '-adaptation_sets', ' '.join(
+                            'id=%s,streams=%s' % (
+                                name,
+                                ','.join(str(x) for x in range(start_id, start_id + len(files)))
+                            ) for name, files, start_id in adaptation_sets_helper
+                        )
+                    ]
+                )
+            }
+        ).run()
+        shutil.move(temp_file_path, self.output().path)
 
-    def execute(self):
-        work_dir = parent_path / uuid.uuid4().hex
-        os.makedirs(work_dir)
-        return work_dir
+    def output(self):
+        return luigi.LocalTarget((file_path.parent / 'manifest.mpd').as_posix())
 
-def ProcessFile(file_path):
-    p = Path('~/temp_dirs')
-    f = lf.Flow()
-    f.add(CreateWorkDir(p))
-    f.add(ExplodePath(rebind={ 'path': 'file_path' }, provides=('file_path_dir', 'file_path_name')))
-    f.add(JoinPaths(rebind={ 'path1': 'work_dir', 'path2': 'file_path_name' }, provides=('file_work_path'))
-    f.add(CopyFile(rebind={ 'source': 'file_path', 'dest': 'file_work_path' }))
-    f.add(GetFFprobeOutput())
-    f.add(DecodeFFprobeOutput())
+class ProcessFileTask(luigi.Task):
+    file_path = luigi.Parameter()
 
+    def requires(self):
+        return FilterStreamsTask(self.file_path)
 
-# Process torrent (Launched by web ui)
-#  - Fetch torrent file
-#  - Put torrent file in transmission watched folder
-### TRANSMISSION
-#  - Process torrent files (Launched by transmission's hook)
-#    - Filter files (keep only video files)
-#    - Process file (parallel)
-#      - Create work folder
-#      - Do work
-#          - Move file to work folder
-#          - Get file info (FFprobe)
-#          - Fetch TMDb ID(s)
-#          - Encode streams
-#          - Encode manifest
-#          - Upload to ACD
-#          - Update library db
-#      - Delete work folder
+    def run(self):
+        with self.input().open('r') as streams_file:
+            streams = pickle.loads(streams_file)
 
+            # Encode streams
+            video_tasks = [
+                [
+                    EncodeVideoStreamTask(
+                        file_path=self.file_path,
+                        video_stream=v,
+                        definition=d,
+                        bitrate=b
+                    ) for d, b in [(1080, '6M'), (720, '3M'), (480, '1.5M')] if d <= v.height
+                ] for v in streams.videos
+            ]
+            audio_tasks = [
+                EncodeAudioStreamTask(
+                    file_path=file_path, 
+                    stream_index=a.index,
+                    lang=a.lang
+                ) for a in streams.audios.values()
+            ]
+            subtitle_tasks = [
+                EncodeSubtitleStreamTask(
+                    file_path=file_path, 
+                    stream_index=s.index,
+                    lang=s.lang
+                ) for s in streams.subtitles.values()
+            ]
+
+            yield chain(chain.from_iterable(video_tasks), audio_tasks, subtitle_tasks)
+
+            # Encode manifest
+            manifest_task = EncodeManifestTask(
+                base_path=self.file_path.parent,
+                adaptation_sets=list(chain(
+                    [(
+                        'video_%s' % v.index, 
+                        [t.output().path for t in video_tasks[i]]
+                    ) for i, v in  enumerate(streams.videos)],
+                    [(
+                        'audio_%s_%s' % (a.index, a.lang), 
+                        [a.output().path]
+                    ) for a in audio_tasks],
+                    [(
+                        'subtitle_%s_%s' % (s.index, s.lang), 
+                        [s.output().path]
+                    ) for s in subtitle_tasks]
+                ))
+            )
+
+            yield manifest_task
+
+            with self.output().open('w') as out:
+                out.writelines(task.output().path for task in chain(
+                    chain.from_iterable(video_tasks),
+                     audio_tasks,
+                     subtitle_tasks,
+                     [manifest_task]
+                ))
+
+    def output(self):
+        return luigi.LocalTarget(self.file_path.parent / 'file_list.txt')
+
+class HandleFileTask(luigi.Task):
+    file_path = luigi.Parameter()
+    base_work_dir = luigi.Parameter()
+    base_final_dir = luigi.Parameter()
+
+    def run(self):
+        file_name = file_path.name
+        base_path = base_work_dir / file_name
+        new_file_path = base_path / file_name
+
+        os.makedirs(base_path)
+
+        shutil.copyfile(file_path, new_file_path)
+
+        process_file_task = ProcessFileTask(new_file_path)
+        yield process_file_task
+
+        # Try to get TMDb from file infos
+
+        # Deduce folder to put in
+
+        # Copy files to acd
+
+        # Update DB to know that the file has been processed
+
+        # Remove work_dir
+        shutil.rmtree(base_path)
