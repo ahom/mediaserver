@@ -334,21 +334,33 @@ class ProcessFileTask(luigi.Task):
     def output(self):
         return luigi.LocalTarget(self.file_path.parent / 'file_list.txt')
 
+class CopyFileTask(luigi.Task):
+    src = luigi.Parameter()
+    dst = luigi.Parameter()
+
+    def run(self):
+        os.makedirs(self.dst.parent.as_posix())
+        tmp_file_path = '%s.tmp' % self.output().path
+        shutil.copyfile(self.src.as_posix(), tmp_file_path)
+        shutil.move(tmp_file_path, self.output().path)
+
+    def output(self):
+        return luigi.LocalTarget(self.dst)
+
+
 class HandleFileTask(luigi.Task):
     file_path = luigi.Parameter()
     base_work_dir = luigi.Parameter()
     base_final_dir = luigi.Parameter()
 
+    def requires(self):
+        return CopyFileTask(
+            src=self.file_path,
+            dst=self.base_work_dir / self.file_path.name / self.file_path.name
+        )
+
     def run(self):
-        file_name = file_path.name
-        base_path = base_work_dir / file_name
-        new_file_path = base_path / file_name
-
-        os.makedirs(base_path)
-
-        shutil.copyfile(file_path, new_file_path)
-
-        process_file_task = ProcessFileTask(new_file_path)
+        process_file_task = ProcessFileTask(self.input().path)
         yield process_file_task
 
         # Try to get TMDb from file infos
