@@ -1,28 +1,19 @@
 from pathlib import Path
 import json
 from itertools import chain
-
-from ffmpy import FFmpeg, FFprobe
+from unittest.mock import patch
 
 from tasks import *
 
-def ffmpy_cmd_out(cmd): 
-    calls = []
-    class WrappedFFmpyCmd:
-        def __init__(self, *args, **kwargs):
-            self.cmd = cmd(*args, **kwargs)
+def test_get_ffprobe_output():
+    file_path = Path('input.mkv')
+    with patch('ffmpy.FFprobe.run', autospec=True) as mock:
+        get_ffprobe_output(file_path)
+        assert mock.call_count == 1
+        call = mock.call_args[0][0].cmd
+        assert file_path.as_posix() in call 
 
-        def run(self):
-            calls.append(self.cmd.cmd)
-            return None, None
-    return WrappedFFmpyCmd, calls
-
-def test_GetFFprobeOutput():
-    wrapper, calls = ffmpy_cmd_out(FFprobe)
-    GetFFprobeOutput(wrapper).execute(Path('input.mkv'))
-    assert calls == ['ffprobe -v error -print_format json -show_streams -i input.mkv']
-
-def test_DecodeFFprobeOutput():
+def test_decode_ffprobe_output():
     filename = 'input.mkv'
     tags = {
         'title': 'title'
@@ -45,13 +36,13 @@ def test_DecodeFFprobeOutput():
         { 'codec_type': 'misc' },
         {}
     ]
-    fi = DecodeFFprobeOutput().execute(json.dumps({
+    fi = decode_ffprobe_output({
         'format': {
             'filename': filename,
             'tags': tags
         },
         'streams': list(chain(video_streams, audio_streams, subtitle_streams, misc_streams)) 
-    }))
+    })
     assert fi.file_format.filename == filename
     assert fi.file_format.tags == tags
     assert fi.streams.videos == [
@@ -59,30 +50,128 @@ def test_DecodeFFprobeOutput():
     ]
     assert fi.streams.audios == [
         AudioStream(index=1, codec='dts', lang='eng'),
-        AudioStream(index=2, codec='vorbis', lang=None),
-        AudioStream(index=3, codec='opus', lang=None)
+        AudioStream(index=2, codec='vorbis', lang='nolang'),
+        AudioStream(index=3, codec='opus', lang='nolang')
     ]
     assert fi.streams.subtitles == [
         SubtitleStream(index=4, lang='eng'),
         SubtitleStream(index=5, lang='fre'),
-        SubtitleStream(index=6, lang=None),
-        SubtitleStream(index=7, lang=None)
+        SubtitleStream(index=6, lang='nolang'),
+        SubtitleStream(index=7, lang='nolang')
     ]
 
-def test_EncodeSubtitleStream():
-    wrapper, calls = ffmpy_cmd_out(FFmpeg)
-    assert Path('subtitle-eng.vtt') == EncodeSubtitleStream(wrapper).execute(Path('input.mkv'), SubtitleStream(index=0, lang='eng'))
-    assert calls == ['ffmpeg -i input.mkv -map 0:0 subtitle-eng.vtt']
+def test_filter_streams():
+    filename = 'input.mkv'
+    tags = {
+        'title': 'title'
+    }
 
-def test_EncodeAudioStream():
-    wrapper, calls = ffmpy_cmd_out(FFmpeg)
-    assert Path('audio-eng.webm') == EncodeAudioStream(wrapper).execute(Path('input.mkv'), AudioStream(index=0, codec='dts', lang='eng'))
-    assert calls == ['ffmpeg -i input.mkv -map 0:0 -c:a libvorbis -b:a 160k -f webm -dash 1 audio-eng.webm']
+    widest_video_stream = VideoStream(index=0, codec='h264', width=1920, height=1080)
+    another_video_stream = VideoStream(index=1, codec='vp9', width=1280, height=720)
 
-def test_EncodeVideoStream():
-    wrapper, calls = ffmpy_cmd_out(FFmpeg)
-    assert Path('video-1080p.webm') == EncodeVideoStream(1080, wrapper).execute(Path('input.mkv'), VideoStream(index=0, codec='h264', width=1920, height=1080))
-    assert calls == [
-        'ffmpeg -i input.mkv -map 0:0 -c:v libvpx-vp9 -s 1920x1080 -b:v 6M -tile-columns 6 -frame-parallel 1 -keyint_min 150 -g 150 -qmin 0 -qmax 50 -f webm -dash 1 -pass 1 -speed 4 /dev/null',
-        'ffmpeg -i input.mkv -map 0:0 -c:v libvpx-vp9 -s 1920x1080 -b:v 6M -tile-columns 6 -frame-parallel 1 -keyint_min 150 -g 150 -qmin 0 -qmax 50 -f webm -dash 1 -pass 2 -speed 1 -auto-alt-ref 1 -lag-in-frames 25 video-1080p.webm'
+    eng_audio_stream = AudioStream(index=2, codec='dts', lang='eng')
+    fre_audio_stream = AudioStream(index=3, codec='vorbis', lang='fre')
+    nolang_audio_stream = AudioStream(index=4, codec='opus', lang='nolang')
+
+    eng_subtitle_stream = SubtitleStream(index=2, lang='eng')
+    fre_subtitle_stream = SubtitleStream(index=3, lang='fre')
+    nolang_subtitle_stream = SubtitleStream(index=4, lang='nolang')
+
+    file_info = FileInfo(
+        file_format=FileFormat(filename=filename, tags=tags),
+        streams=Streams(
+            videos=[widest_video_stream, another_video_stream],
+            audios=[eng_audio_stream, fre_audio_stream, nolang_audio_stream] * 2,
+            subtitles=[eng_subtitle_stream, fre_subtitle_stream, nolang_subtitle_stream] * 2
+        )
+    )
+
+    s = filter_streams(file_info)
+    assert s.videos == [widest_video_stream]
+    assert s.audios == {
+        'eng': [eng_audio_stream],
+        'fre': [fre_audio_stream],
+        'nolang': [nolang_audio_stream]
+    }
+    assert s.subtitles == {
+        'eng': [eng_subtitle_stream],
+        'fre': [fre_subtitle_stream],
+        'nolang': [nolang_subtitle_stream]
+    }
+
+def test_encode_video_stream():
+    file_path = Path('input.mkv')
+    video_stream = VideoStream(index=1, codec='h264', width=1920, height=1080)
+    definition = 720
+    bitrate = '3M'
+    output_file_path = Path('output.webm')
+    with patch('ffmpy.FFmpeg.run', autospec=True) as mock:
+        encode_video_stream(file_path, video_stream, definition, bitrate, output_file_path)
+
+        assert mock.call_count == 2
+
+        first_pass_call = mock.call_args_list[0][0][0].cmd
+        second_pass_call = mock.call_args_list[1][0][0].cmd
+
+        assert '-i %s' % file_path.as_posix() in first_pass_call
+        assert '-map 0:%s' % video_stream.index in first_pass_call
+        assert '-s %sx%s' % (video_stream.width * definition // video_stream.height, definition) in first_pass_call
+        assert '-b:v %s' % bitrate in first_pass_call
+        assert '-passlogfile %s.stats' % output_file_path.as_posix() in first_pass_call
+        assert '-pass 1' in first_pass_call
+        assert '/dev/null' in first_pass_call
+
+        assert '-i %s' % file_path.as_posix() in second_pass_call
+        assert '-map 0:%s' % video_stream.index in second_pass_call
+        assert '-s %sx%s' % (video_stream.width * definition // video_stream.height, definition) in second_pass_call
+        assert '-b:v %s' % bitrate in second_pass_call
+        assert '-pass 2' in second_pass_call
+        assert output_file_path.as_posix() in second_pass_call
+
+def test_encode_audio_stream():
+    file_path = Path('input.mkv')
+    audio_stream = AudioStream(index=1, codec='opus', lang='eng')
+    output_file_path = Path('output.webm')
+    with patch('ffmpy.FFmpeg.run', autospec=True) as mock:
+        encode_audio_stream(file_path, audio_stream, output_file_path)
+        assert mock.call_count == 1
+
+        call = mock.call_args[0][0].cmd
+
+        assert '-i %s' % file_path.as_posix() in call
+        assert '-map 0:%s' % audio_stream.index in call
+        assert output_file_path.as_posix() in call
+
+def test_encode_subtitle_stream():
+    file_path = Path('input.mkv')
+    subtitle_stream = SubtitleStream(index=1, lang='eng')
+    output_file_path = Path('output.vtt')
+    with patch('ffmpy.FFmpeg.run', autospec=True) as mock:
+        encode_subtitle_stream(file_path, subtitle_stream, output_file_path)
+        assert mock.call_count == 1
+
+        call = mock.call_args[0][0].cmd
+
+        assert '-i %s' % file_path.as_posix() in call
+        assert '-map 0:%s' % subtitle_stream.index in call
+        assert output_file_path.as_posix() in call
+
+def test_encode_manifest():
+    base_path = Path('/random/base/path/')
+    adaptation_sets = [
+        ('adapt_0', [base_path / 'file_0', base_path / 'file_1']),
+        ('adapt_1', [base_path / 'file_2'])
     ]
+    output_file_path = Path('manifest.mpd')
+    with patch('ffmpy.FFmpeg.run', autospec=True) as mock:
+        encode_manifest(base_path, adaptation_sets, output_file_path)
+        assert mock.call_count == 1
+
+        call = mock.call_args[0][0].cmd
+
+        for i in range(0, 3):
+            assert '-f webm_dash_manifest -i file_%s' % i in call
+            assert '-map %s' % i in call
+
+        assert '-f webm_dash_manifest -adaptation_sets "id=adapt_0,streams=0,1 id=adapt_1,streams=2"' in call
+        assert output_file_path.as_posix() in call
