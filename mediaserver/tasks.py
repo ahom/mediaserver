@@ -136,15 +136,15 @@ def encode_video_stream(file_path, stream_index, stream_width, stream_height, de
     common_options = [
         '-y',
         '-map', '0:%s' % stream_index,
-        '-c:v', 'libvpx-vp9',
+        '-c:v', 'libvpx',
         '-s', '%sx%s' % (definition * stream_width // stream_height, definition),
         '-b:v', bitrate,
-        '-tile-columns', '6',
-        '-frame-parallel', '1',
         '-keyint_min', '150',
         '-g', '150',
         '-qmin', '0',
-        '-qmax', '50',
+        '-qmax', '60',
+        '-slices', '8',
+        '-threads', '2',
         '-f', 'webm',
         '-dash', '1',
         '-passlogfile', '%s.stats' % output_file_path
@@ -154,8 +154,7 @@ def encode_video_stream(file_path, stream_index, stream_width, stream_height, de
         inputs={ file_path: None },
         outputs={ 
             '/dev/null': chain(common_options, [
-                '-pass', '1',
-                '-speed', '4'
+                '-pass', '1'
             ])
         }
     ).run()
@@ -165,7 +164,6 @@ def encode_video_stream(file_path, stream_index, stream_width, stream_height, de
         outputs={ 
             output_file_path: chain(common_options, [
                 '-pass', '2',
-                '-speed', '1',
                 '-auto-alt-ref', '1',
                 '-lag-in-frames', '25'
             ])
@@ -323,6 +321,7 @@ class ProcessFileTask(luigi.Task):
                     ) for s in s_list
                 ] for s_list in streams.subtitles.values()
             ]))
+            subtitle_tasks = []
 
             yield chain(chain.from_iterable(video_tasks), audio_tasks, subtitle_tasks)
 
@@ -337,11 +336,11 @@ class ProcessFileTask(luigi.Task):
                     [(
                         'audio_%s_%s' % (a.index, a.lang), 
                         [audio_tasks[i].output().path]
-                    ) for i, a in enumerate(chain.from_iterable(streams.audios.values()))],
-                    [(
-                        'subtitle_%s_%s' % (s.index, s.lang), 
-                        [subtitle_tasks[i].output().path]
-                    ) for i, s in enumerate(chain.from_iterable(streams.subtitles.values()))]
+                    ) for i, a in enumerate(chain.from_iterable(streams.audios.values()))]
+                    #[(
+                    #    'subtitle_%s_%s' % (s.index, s.lang), 
+                    #    [subtitle_tasks[i].output().path]
+                    #) for i, s in enumerate(chain.from_iterable(streams.subtitles.values()))]
                 ))
             )
 
