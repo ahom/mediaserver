@@ -362,7 +362,9 @@ class CopyFileTask(luigi.Task):
     dst = luigi.Parameter()
 
     def run(self):
-        makedirs(path.dirname(self.dst))
+        dir_path = path.dirname(self.dst)
+        if not path.exists(dir_path):
+            makedirs(dir_path)
         tmp_file_path = '%s.tmp' % self.output().path
         shutil.copyfile(self.src, tmp_file_path)
         shutil.move(tmp_file_path, self.output().path)
@@ -387,7 +389,7 @@ class HandleFileTask(luigi.Task):
         process_file_task = ProcessFileTask(self.input().path)
         yield process_file_task
 
-        staging_dir = path.join(self.staging_dir, path.basename(self.file_path))
+        staging_dir = path.join(self.base_staging_dir, path.basename(self.file_path))
 
         with process_file_task.output().open('r') as list_file:
             yield [CopyFileTask(
