@@ -302,7 +302,7 @@ class ProcessFileTask(luigi.Task):
                         stream_height=v.height,
                         definition=d,
                         bitrate=b
-                    ) for d, b in [(1080, '6M'), (720, '3M'), (480, '1.5M')] if d <= v.height
+                    ) for d, b in [(1080, '10M'), (720, '5M'), (480, '2.5M')] if d <= v.height
                 ] for v in streams.videos
             ]
             audio_tasks = list(chain.from_iterable([
@@ -347,12 +347,12 @@ class ProcessFileTask(luigi.Task):
             yield manifest_task
 
             with self.output().open('w') as out:
-                out.writelines(task.output().path for task in chain(
+                out.write("\n".join(task.output().path for task in chain(
                     chain.from_iterable(video_tasks),
-                     audio_tasks,
-                     subtitle_tasks,
-                     [manifest_task]
-                ))
+                    audio_tasks,
+                    subtitle_tasks,
+                    [manifest_task]
+                )))
 
     def output(self):
         return luigi.LocalTarget(path.join(path.dirname(self.file_path), 'file_list.txt'))
@@ -374,6 +374,7 @@ class CopyFileTask(luigi.Task):
 class HandleFileTask(luigi.Task):
     file_path = luigi.Parameter()
     base_work_dir = luigi.Parameter()
+    base_staging_dir = luigi.Parameter()
 
     def requires(self):
         filename = path.basename(self.file_path)
@@ -386,13 +387,12 @@ class HandleFileTask(luigi.Task):
         process_file_task = ProcessFileTask(self.input().path)
         yield process_file_task
 
-        # Try to get TMDb from file infos
+        staging_dir = path.join(self.staging_dir, path.basename(self.file_path))
 
-        # Deduce folder to put in
+        with process_file_task.output().open('r') as list_file:
+            yield [CopyFileTask(
+                src=file_path.strip(),
+                dst=path.join(staging_dir, path.basename(file_path.strip()))
+            ) for file_path in list_file]
 
-        # Copy files to acd
-
-        # Update DB to know that the file has been processed
-
-        # Remove work_dir
-        # shutil.rmtree(base_path)
+        shutil.rmtree(path.join(self.base_work_dir, path.basename(self.file_path)))
