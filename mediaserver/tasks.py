@@ -323,7 +323,7 @@ class ProcessFileTask(luigi.Task):
             ]))
             subtitle_tasks = []
 
-            yield chain(chain.from_iterable(video_tasks), audio_tasks, subtitle_tasks)
+            yield chain(chain.from_iterable(video_tasks), audio_tasks)
 
             # Encode manifest
             manifest_task = EncodeManifestTask(
