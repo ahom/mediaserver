@@ -397,4 +397,9 @@ class HandleFileTask(luigi.Task):
                 dst=path.join(staging_dir, path.basename(file_path.strip()))
             ) for file_path in list_file]
 
+        yield CopyFileTask(
+            src=self.input().path,
+            dst=path.join(staging_dir, 'input.mkv')
+        )
+
         shutil.rmtree(path.join(self.base_work_dir, path.basename(self.file_path)))
